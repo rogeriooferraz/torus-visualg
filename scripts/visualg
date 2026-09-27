@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+
+# Copyright (c) 2026 Rogerio O. Ferraz <rogerio.o.ferraz@gmail.com>
+
+# MIT License
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+pidfile="/tmp/visualg-$UID.pid"
+child=""
+
+restore_terminal() {
+    # Restore visible cursor.
+    printf '\033[?25h'
+
+    # Remove the PID file only if it belongs to this wrapper.
+    if [ -f "$pidfile" ]; then
+        read -r owner_pid running_child < "$pidfile"
+
+        if [ "$owner_pid" = "$$" ]; then
+            rm -f "$pidfile"
+        fi
+    fi
+}
+
+stop_child() {
+    # Graceful termination.
+    if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
+        kill -TERM "$child" 2>/dev/null || true
+    fi
+}
+
+kill_child() {
+    # Immediate termination.
+    if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
+        kill -KILL "$child" 2>/dev/null || true
+    fi
+}
+
+show_usage() {
+    cat <<'EOF'
+Usage:
+  visualg <program.alg> [arguments...]
+  visualg <program> [arguments...]
+  visualg --kill
+
+Controls:
+  Ctrl+Shift+C   stop program
+  Ctrl+\         force-kill program
+
+Options:
+  -k, --kill     force-kill the running VisuAlg program
+  -h, --help     show this help
+EOF
+}
+
+
+# Handle commands that do not start a program.
+
+case "${1:-}" in
+
+    --kill|-k)
+        if [ ! -f "$pidfile" ]; then
+            echo "visualg: no running program found" >&2
+            exit 1
+        fi
+
+        read -r wrapper_pid running_child < "$pidfile"
+
+        if [ -z "$running_child" ] || ! kill -0 "$running_child" 2>/dev/null; then
+            echo "visualg: stale PID file" >&2
+            rm -f "$pidfile"
+            exit 1
+        fi
+
+        kill -KILL "$running_child"
+
+        echo "visualg: program killed"
+        exit 0
+        ;;
+
+    --help|-h)
+        show_usage
+        exit 0
+        ;;
+
+    "")
+        show_usage
+        exit 1
+        ;;
+
+esac
+
+
+# Only one managed VisuAlg instance at a time.
+
+if [ -f "$pidfile" ]; then
+    read -r wrapper_pid running_child < "$pidfile"
+
+    if [ -n "$wrapper_pid" ] && kill -0 "$wrapper_pid" 2>/dev/null; then
+        echo "visualg: another program is already running" >&2
+        echo "visualg: use 'visualg --kill' to terminate it" >&2
+        exit 1
+    fi
+
+    # Remove a stale PID file.
+    rm -f "$pidfile"
+fi
+
+
+program="$1"
+shift
+
+# Allow:
+#
+#   visualg torus.alg
+#
+# or simply:
+#
+#   visualg torus
+
+if [ ! -f "$program" ]; then
+    if [ -f "${program}.alg" ]; then
+        program="${program}.alg"
+    else
+        echo "visualg: file not found: $program" >&2
+        exit 1
+    fi
+fi
+
+
+# Always restore the terminal when the wrapper exits.
+
+trap restore_terminal EXIT
+
+
+# Your terminal maps Ctrl+Shift+C to the traditional
+# Ctrl+C control character, which arrives here as SIGINT.
+
+trap '
+    stop_child
+    exit 130
+' INT
+
+
+# Ctrl+\ produces SIGQUIT and is our emergency stop.
+
+trap '
+    kill_child
+    exit 131
+' QUIT
+
+
+# Graceful cleanup if the wrapper itself is terminated.
+
+trap '
+    stop_child
+    exit 143
+' TERM
+
+
+# Start Delegua asynchronously so the wrapper remains alive
+# to receive signals and restore the terminal afterwards.
+
+delegua --dialeto visualg "$program" "$@" &
+
+child=$!
+
+# Store both wrapper and Delegua PIDs.
+#
+# Format:
+#
+#   <wrapper-pid> <delegua-pid>
+
+printf '%s %s\n' "$$" "$child" > "$pidfile"
+
+
+# Wait for Delegua to finish.
+
+wait "$child"
+status=$?
+
+exit "$status"

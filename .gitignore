@@ -1,0 +1,13 @@
+# OS/editor files
+.DS_Store
+*~
+*.swp
+*.swo
+
+# Local/runtime artifacts
+*.log
+*.pid
+
+# Generated inspection/rendering output
+.tmp/
+tmp/
